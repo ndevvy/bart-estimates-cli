@@ -3,43 +3,64 @@
 require 'httparty'
 require 'colorize'
 require 'terminal-table'
+require 'json'
+
+module RouteUtils
+  def self.fetch_all_routes
+    resp = HTTParty.ge
+    routes = resp.to_h["root"]["routes"]["route"]
+    full_route_datas = []
+    routes.each do |route|
+      full_route_datas << fetch_route_info(route["number"])
+      sleep(1)
+    end
+    File.open('out.txt', 'w') { |f| f.puts(full_route_datas.to_json) }
+  end
+
+  def self.fetch_route_info(route_num)
+    resp = HTTParty.get("http://api.bart.gov/api/route.aspx?cmd=routeinfo&route=#{route_num}&key=MW9S-E7SL-26DU-VV8V")
+    resp.to_h
+  end
+end
 
 class BartEstimates
   DIRECTIONS = { n: :north, s: :south, e: :east, w: :west }.freeze
   ALT_COLORS = { orange: :light_red }.freeze
 
-  attr_accessor :raw_estimates, :station, :estimates, :time, :station_name, :direction, :colors
+  attr_accessor :raw_estimates, :station, :estimates, :time, :station_name, :direction
 
-  def initialize(station, direction = nil, colors = true)
+  def initialize(station, direction = nil, colors = true, notify=false, destination=nil)
     @station = station.upcase
+    String.disable_colorization = true unless colors
     direction = DIRECTIONS[direction[0].downcase.to_sym] if direction
-    @direction = direction
-    @colors = colors
+    @direction, @notify, @destination = direction, notify, destination
     @estimates = {}
     self
+  end
+
+  def train_goes_to_destination?(train)
   end
 
   def run
     fetch_estimates
     store_estimates
+    fetch_advisories
     self
   end
 
-  def self.formatted_estimate(est, colors)
-    minutes_str = (est['minutes']).to_s
+  def self.formatted_estimate(est)
+    minutes_str = "#{est['minutes']} minutes".light_white
     destination_str = (est['destination']).to_s
-    if colors
-      color = est['color'].downcase.to_sym
-      color = ALT_COLORS[color] || color
-      destination_str = destination_str.send(color)
-    end
+    color = est['color'].downcase.to_sym
+    color = ALT_COLORS[color] || color
+    destination_str = destination_str.send(color)
     [minutes_str, destination_str].join(' ')
   end
 
   def tabify_results
     columns = []
     estimates.each do |_dir, ests|
-      columns << ests.map { |e| self.class.formatted_estimate(e, colors) }
+      columns << ests.map { |e| self.class.formatted_estimate(e) }
     end
     columns = columns.reduce(&:zip)
     columns.map do |col|
@@ -54,13 +75,15 @@ class BartEstimates
   def text_results_alt
     tabs = tabify_results
     table = Terminal::Table.new
-    table.title =  "Arrival estimates for #{station_name} @ #{time}"
+    table.title =  "Arrival estimates for #{station_name}\n#{time.send(:black).on_light_blue}"
     table.headings = estimates.keys.map do |k|
-      direction = "#{k}bound".upcase
-      direction = direction.colorize(:light_blue) if colors
-      direction
+      "#{k}bound".upcase.colorize(:light_white)
     end
     table.rows = tabs
+    if @parsed_advisories.length > 1
+      table << :separator
+      @parsed_advisories.each { |p| puts p}
+    end
     puts table
   end
 
@@ -72,19 +95,6 @@ class BartEstimates
       puts "#{direction.capitalize}bound trains".magenta
       ests.each do |est|
         puts self.class.formatted_estimate(est)
-      end
-      puts
-    end
-  end
-
-  def text_results
-    puts "BART arrival estimates for #{station_name}".magenta
-    puts time.to_s.magenta
-    puts
-    estimates.each do |direction, ests|
-      puts "#{direction.capitalize}bound trains".magenta
-      ests.each do |est|
-        puts "#{est['minutes']} minutes #{est['destination'].send(est['color'].downcase)}"
       end
       puts
     end
@@ -110,14 +120,46 @@ class BartEstimates
         BartEstimates.parse_estimate_hash(_estimates)
       end.flatten
     end
-    p @estimates
     @estimates = @estimates.group_by { |e| e['direction'] }
     @estimates.each { |_, ests| ests.sort_by! { |e| e['minutes'] } }
+  end
+
+  def parsed_advisories
+    advisories = @raw_advisories['root']['bsa']
+    message = @raw_advisories['root']['bsa']['message']
+    if advisories.is_a?(Array)
+      advisories.map { |a| BartEstimates.parsed_advisory(a) }.concat(['', message])
+    else
+      [[BartEstimates.parsed_advisory(advisories)], ['', message]]
+    end
+  end
+
+  ADVISORY_TYPES = { delay: :light_yellow, emergency: :light_red }.freeze
+
+  def self.parsed_advisory(advisory)
+    return advisory['description'].light_green unless advisory['station']
+    color = ADVISORY_TYPES[advisory['type'].downcase.to_sym]
+    [advisory['posted'], advisory["description"].send(color)]
+    # "#{advisory['posted']} #{advisory['description'].send(color)}"
   end
 
   def fetch_estimates
     resp = HTTParty.get(url)
     @raw_estimates = resp.to_h
+  end
+
+  def fetch_advisories
+    last_adv = @raw_advisories
+    resp = HTTParty.get(BartEstimates.bsa_url)
+    @raw_advisories = resp.to_h
+    if last_adv != @raw_advisories
+      notify_advisories if @notify
+      @parsed_advisories = parsed_advisories
+    end
+  end
+
+  def self.bsa_url
+    'http://api.bart.gov/api/bsa.aspx?cmd=bsa&key=MW9S-E7SL-26DU-VV8V&date=today'
   end
 
   def url
@@ -132,7 +174,30 @@ if ARGV.length > 0
   station = ARGV[0]
   direction = ARGV[1]
   colors = !ARGV.include?('--no-color')
-  p station, direction, colors
+  polling = ARGV.include?('--polling')
+  notify = ARGV.include?('--notify')
+  if notify && !polling
+    puts "--notify only works with polling".red
+    sleep(2)
+  end
   est = BartEstimates.new(station, direction, colors).run
-  est.text_results_alt
+  if polling
+    loop do
+      count = 30
+      system('clear')
+      est.text_results_alt
+      while count > 0
+        if count <= 10
+          est.run
+          system('clear')
+          est.text_results_alt
+          puts "Refreshing in #{count}.\r"
+        end
+        count -= 1
+        sleep(1)
+      end
+    end
+  else
+    est.text_results_alt
+  end
 end
