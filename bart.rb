@@ -1,20 +1,43 @@
 #!/usr/bin/ruby
-#
+
+
 require 'httparty'
 require 'colorize'
 require 'terminal-table'
 require 'json'
 
 module RouteUtils
+  def self.show_routes
+    JSON.parse(File.read('./routes.json'))
+  end
+
+  # This method populated the routes.json file.  You should not need to update it frequently.
   def self.fetch_all_routes
-    resp = HTTParty.ge
+    resp = HTTParty.get("http://api.bart.gov/api/route.aspx?cmd=routes&key=MW9S-E7SL-26DU-VV8V")
     routes = resp.to_h["root"]["routes"]["route"]
-    full_route_datas = []
+    full_route_datas = {}
     routes.each do |route|
-      full_route_datas << fetch_route_info(route["number"])
-      sleep(1)
+      raw_data = fetch_route_info(route["number"])
+      full_route_datas[route["number"]] = parsed_route_data(raw_data)
+      sleep(0.2)
     end
-    File.open('out.txt', 'w') { |f| f.puts(full_route_datas.to_json) }
+    f = File.open('routes.json', 'w+')
+    f.puts(full_route_datas.to_json)
+    f.close
+    show_routes
+  end
+
+  def self.parsed_route_data(raw_data)
+    raw_data = raw_data["root"]
+    routes = raw_data["routes"].delete("route")
+    raw_data.delete("routes")
+    stations =
+      routes["config"]["station"]
+      .each_with_index
+      .map { |station, idx| [station, idx] }
+      .to_h
+    raw_data["stations"] = stations
+    raw_data
   end
 
   def self.fetch_route_info(route_num)
