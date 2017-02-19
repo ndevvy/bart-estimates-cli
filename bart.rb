@@ -11,14 +11,17 @@ module RouteUtils
     JSON.parse(File.read('./routes.json'))
   end
 
-  # This method populated the routes.json file.  You should not need to update it frequently.
+  # Populate the routes.json file; should not need to be run very frequently...
   def self.fetch_all_routes
     resp = HTTParty.get("http://api.bart.gov/api/route.aspx?cmd=routes&key=MW9S-E7SL-26DU-VV8V")
     routes = resp.to_h["root"]["routes"]["route"]
     full_route_datas = {}
     routes.each do |route|
       raw_data = fetch_route_info(route["number"])
-      full_route_datas[route["number"]] = parsed_route_data(raw_data)
+      parsed = parsed_route_data(raw_data)
+      color = parsed["routes"]["route"]["color"]
+      full_route_datas[color] ||= []
+      full_route_datas[color] << parsed
       sleep(0.2)
     end
     f = File.open('routes.json', 'w+')
@@ -29,14 +32,13 @@ module RouteUtils
 
   def self.parsed_route_data(raw_data)
     raw_data = raw_data["root"]
-    routes = raw_data["routes"].delete("route")
-    raw_data.delete("routes")
     stations =
-      routes["config"]["station"]
+      raw_data["routes"]["route"]["config"]["station"]
       .each_with_index
       .map { |station, idx| [station, idx] }
       .to_h
     raw_data["stations"] = stations
+    raw_data["destination"]
     raw_data
   end
 
@@ -74,9 +76,9 @@ class BartEstimates
   def self.formatted_estimate(est)
     minutes_str = "#{est['minutes']} minutes".light_white
     destination_str = (est['destination']).to_s
-    color = est['color'].downcase.to_sym
+    color = est['color']&.downcase&.to_sym
     color = ALT_COLORS[color] || color
-    destination_str = destination_str.send(color)
+    destination_str = destination_str.send(color) if color
     [minutes_str, destination_str].join(' ')
   end
 
@@ -103,11 +105,10 @@ class BartEstimates
       "#{k}bound".upcase.colorize(:light_white)
     end
     table.rows = tabs
+    puts table
     if @parsed_advisories.length > 1
-      table << :separator
       @parsed_advisories.each { |p| puts p}
     end
-    puts table
   end
 
   def text_results
@@ -126,7 +127,12 @@ class BartEstimates
   def self.parse_estimate_hash(estimate_hash)
     destination = estimate_hash['destination']
     estimate_hash['estimate'].map do |estimate|
-      est = { 'destination' => destination }.merge(estimate)
+      est = { 'destination' => destination }
+      if estimate.is_a?(Hash)
+        est = est.merge(estimate)
+      else
+        est = est.merge([estimate].to_h)
+      end
       est['minutes'] = est['minutes'].to_i
       est['length'] = est['length'].to_i
       est
@@ -176,13 +182,36 @@ class BartEstimates
     resp = HTTParty.get(BartEstimates.bsa_url)
     @raw_advisories = resp.to_h
     if last_adv != @raw_advisories
-      notify_advisories if @notify
+      last_parsed = @parsed_advisories
       @parsed_advisories = parsed_advisories
+      if @notify
+        new_advisories = @parsed_advisories - last_parsed
+        `osascript -e 'display notification "BART advisory update: #{new_advisories.join(" ")}" with title 'BART delay'`
+        notify_advisories if @notify
+      end
     end
+  end
+
+  def notify_advisories(advisories)
+    `osascript -e 'display notification "Lorem ipsum dolor sit amet" with title "BART delay"'`
   end
 
   def self.bsa_url
     'http://api.bart.gov/api/bsa.aspx?cmd=bsa&key=MW9S-E7SL-26DU-VV8V&date=today'
+  end
+
+  def self.list_stations
+    stations = JSON.parse(File.read('./stations.json')).to_a
+    tabs = []
+    until stations.length < 3
+      tabs << stations.pop(3)
+    end
+
+    until stations.length == 3
+      stations << nil
+    end
+
+    tabs << stations
   end
 
   def url
@@ -194,8 +223,12 @@ class BartEstimates
 end
 
 if ARGV.length > 0
+  if ARGV.include?("list")
+    BartEstimates.list_stations
+  end
   station = ARGV[0]
   direction = ARGV[1]
+  destination = ARGV[2]
   colors = !ARGV.include?('--no-color')
   polling = ARGV.include?('--polling')
   notify = ARGV.include?('--notify')
@@ -203,7 +236,7 @@ if ARGV.length > 0
     puts "--notify only works with polling".red
     sleep(2)
   end
-  est = BartEstimates.new(station, direction, colors).run
+  est = BartEstimates.new(station, direction, colors, destination).run
   if polling
     loop do
       count = 30
