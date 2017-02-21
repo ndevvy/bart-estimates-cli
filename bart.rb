@@ -1,52 +1,9 @@
 #!/usr/bin/ruby
-
-
 require 'httparty'
 require 'colorize'
 require 'terminal-table'
 require 'json'
 
-module RouteUtils
-  def self.show_routes
-    JSON.parse(File.read('./routes.json'))
-  end
-
-  # Populate the routes.json file; should not need to be run very frequently...
-  def self.fetch_all_routes
-    resp = HTTParty.get("http://api.bart.gov/api/route.aspx?cmd=routes&key=MW9S-E7SL-26DU-VV8V")
-    routes = resp.to_h["root"]["routes"]["route"]
-    full_route_datas = {}
-    routes.each do |route|
-      raw_data = fetch_route_info(route["number"])
-      parsed = parsed_route_data(raw_data)
-      color = parsed["routes"]["route"]["color"]
-      full_route_datas[color] ||= []
-      full_route_datas[color] << parsed
-      sleep(0.2)
-    end
-    f = File.open('routes.json', 'w+')
-    f.puts(full_route_datas.to_json)
-    f.close
-    show_routes
-  end
-
-  def self.parsed_route_data(raw_data)
-    raw_data = raw_data["root"]
-    stations =
-      raw_data["routes"]["route"]["config"]["station"]
-      .each_with_index
-      .map { |station, idx| [station, idx] }
-      .to_h
-    raw_data["stations"] = stations
-    raw_data["destination"]
-    raw_data
-  end
-
-  def self.fetch_route_info(route_num)
-    resp = HTTParty.get("http://api.bart.gov/api/route.aspx?cmd=routeinfo&route=#{route_num}&key=MW9S-E7SL-26DU-VV8V")
-    resp.to_h
-  end
-end
 
 class BartEstimates
   DIRECTIONS = { n: :north, s: :south, e: :east, w: :west }.freeze
@@ -222,6 +179,28 @@ class BartEstimates
   end
 end
 
+class EstimatePoller
+  def initialize(estimator, refresh_rate=30)
+    @estimator, @refresh_rate = estimator, refresh_rate
+  end
+
+  def run
+    loop do
+      count = @refresh_rate
+      @estimator.run
+      while count > 0
+        system('clear')
+        @estimator.text_results_alt
+        if count <= 10
+          puts  "Refreshing in #{count}"
+        end
+        count -= 1
+        sleep(1)
+      end
+    end
+  end
+end
+
 if ARGV.length > 0
   if ARGV.include?("list")
     BartEstimates.list_stations
@@ -234,25 +213,11 @@ if ARGV.length > 0
   notify = ARGV.include?('--notify')
   if notify && !polling
     puts "--notify only works with polling".red
-    sleep(2)
+    sleep(1)
   end
   est = BartEstimates.new(station, direction, colors, destination).run
   if polling
-    loop do
-      count = 30
-      system('clear')
-      est.text_results_alt
-      while count > 0
-        if count <= 10
-          est.run
-          system('clear')
-          est.text_results_alt
-          puts "Refreshing in #{count}.\r"
-        end
-        count -= 1
-        sleep(1)
-      end
-    end
+    EstimatePoller.new(est).run
   else
     est.text_results_alt
   end
