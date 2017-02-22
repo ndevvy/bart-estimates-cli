@@ -29,5 +29,5 @@ notifications if there are new system advisory warnings.
 ```
 
 ### Todo
--[] bash completion for station names
--[] notify when a train is x minutes away
+- [ ] bash completion for station names
+- [ ] notify when a train is x minutes away
