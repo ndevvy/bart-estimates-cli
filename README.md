@@ -3,7 +3,10 @@ A simple command line tool for retrieving and displaying information about
 arrival times at BART stations.  
 
 ### Installation
-Clone the repo and `bundle install` from the `src` directory.
+Clone the repo.
+
+`cd src && bundle install`
+
 `ruby bart.rb {station}` to see estimates. Optionally, specify a direction; by
 default all directions will be displayed.
 
